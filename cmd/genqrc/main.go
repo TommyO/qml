@@ -40,6 +40,12 @@
 // This does not update the static content in the qrc.go file, though, so after
 // the changes are performed, genqrc must be run again to update the content that
 // will ship with built binaries.
+//
+// NOTES:
+//     * Files labeled *.qrc are not parsed unless explicitely set in the parameters list.
+//     * All *.qmltypes files are ignored, since they are not intended to be useful to the compiled code.
+//     * qmldir files are currently ignored and so import definitions need to be handled accordingly. Would love for this to change.
+
 package main
 
 import (
@@ -68,7 +74,7 @@ may then be loaded by Go or QML code under the URL "qrc:///some/path", where
 "some/path" matches the original path for the resource file locally.
 
 paths can be:
-  * a .qrc filename, as defined by http://doc.qt.io/qt-5/resources.html and built by
+  * a *.qrc filename, as defined by http://doc.qt.io/qt-5/resources.html and built by
       Qt Creator. This is the preferred method
   * a filename. The file will be imported directly
   * a directory. all files within the directory will be imported
@@ -96,6 +102,11 @@ setting the QRC_REPACK environment variable to 1:
 This does not update the static content in the qrc.go file, though, so after
 the changes are performed, genqrc must be run again to update the content that
 will ship with built binaries.
+
+NOTES:
+    * Files labeled *.qrc are not parsed unless explicitely set in the parameters list.
+    * All *.qmltypes files are ignored, since they are not intended to be useful to the compiler.
+    * qmldir files are currently ignored and so import definitions need to be handled accordingly. Would love for this to change.
 `
 
 var packageName = flag.String("package", "main", "package name that qrc.go will be under (not needed for go generate)")
@@ -124,7 +135,7 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 			return nil, err
 		}
 
-		base := path.Dir(name)
+		dir := path.Dir(name)
 
 		qrc := qrcQrcFile{}
 		err = xml.Unmarshal(data, &qrc)
@@ -140,7 +151,7 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 				if file.Alias != "" {
 					label = file.Alias
 				}
-				out[path.Join(resource.Prefix, label)] = path.Join(base, file.Name)
+				out[path.Join(resource.Prefix, label)] = path.Join(dir, file.Name)
 			}
 		}
 		return out, nil
@@ -156,8 +167,17 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 			if info.IsDir() {
 				return nil
 			}
-			fmt.Println(name, path.Ext(name))
-			if path.Ext(name) == ".qrc" {
+			// ignore qmldir files for now
+			if info.Name() == "qmldir" {
+				return nil
+			}
+
+			ext := path.Ext(name)
+			// *.qmltypes files shouldn't be included
+			switch ext {
+			case ".qmltypes":
+				break
+			case ".qrc":
 				files, err := qrcParseQrc(name)
 				if err != nil {
 					return err
@@ -169,14 +189,13 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 					}
 					rp.Add(label, data)
 				}
-				return nil
+			default:
+				data, err := ioutil.ReadFile(name)
+				if err != nil {
+					return err
+				}
+				rp.Add(filepath.ToSlash(name), data)
 			}
-
-			data, err := ioutil.ReadFile(name)
-			if err != nil {
-				return err
-			}
-			rp.Add(filepath.ToSlash(name), data)
 			return nil
 		})
 		if err != nil {
@@ -324,7 +343,17 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 			if info.IsDir() {
 				return nil
 			}
-			if path.Ext(name) == "qrc" {
+			// ignore qmldir files for now
+			if info.Name() == "qmldir" {
+				return nil
+			}
+
+			ext := path.Ext(name)
+			// *.qmltypes files shouldn't be included
+			switch ext {
+			case ".qmltypes":
+				break
+			case ".qrc":
 				files, err := qrcParseQrc(name)
 				if err != nil {
 					return err
@@ -336,14 +365,13 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 					}
 					rp.Add(label, data)
 				}
-				return nil
+			default:
+				data, err := ioutil.ReadFile(name)
+				if err != nil {
+					return err
+				}
+				rp.Add(filepath.ToSlash(name), data)
 			}
-
-			data, err := ioutil.ReadFile(name)
-			if err != nil {
-				return err
-			}
-			rp.Add(filepath.ToSlash(name), data)
 			return nil
 		})
 		if err != nil {
