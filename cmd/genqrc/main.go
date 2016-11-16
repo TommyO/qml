@@ -4,33 +4,39 @@
 
 // Command genqrc packs resource files into the Go binary.
 //
-// Usage: genqrc [options] <subdir1> [<subdir2> ...]
-// 
-// The genqrc tool packs all resource files under the provided subdirectories into
+// Usage: genqrc [options] <path1> [<path2> ...]
+//
+// The genqrc tool packs all resource files under the provided paths into
 // a single qrc.go file that may be built into the generated binary. Bundled files
 // may then be loaded by Go or QML code under the URL "qrc:///some/path", where
 // "some/path" matches the original path for the resource file locally.
-// 
+//
+// paths can be:
+//   * a .qrc filename, as defined by http://doc.qt.io/qt-5/resources.html and built by
+//       Qt Creator. This is the preferred method
+//   * a filename. The file will be imported directly
+//   * a directory. all files within the directory will be imported
+//
 // For example, the following will load a .qml file from the resource pack, and
 // that file may in turn reference other content (code, images, etc) in the pack:
-// 
+//
 //     component, err := engine.LoadFile("qrc://path/to/file.qml")
-// 
+//
 // Starting with Go 1.4, this tool may be conveniently run by the "go generate"
 // subcommand by adding a line similar to the following one to any existent .go
 // file in the project (assuming the subdirectories ./code/ and ./images/ exist):
-// 
-//     //go:generate genqrc code images
-// 
+//
+//     //go:generate genqrc qml.qrc main.qml code images
+//
 // Then, just run "go generate" to update the qrc.go file.
-// 
+//
 // During development, the generated qrc.go can repack the filesystem content at
 // runtime to avoid the process of regenerating the qrc.go file and rebuilding the
 // application to test every minor change made. Runtime repacking is enabled by
 // setting the QRC_REPACK environment variable to 1:
-// 
+//
 //     export QRC_REPACK=1
-// 
+//
 // This does not update the static content in the qrc.go file, though, so after
 // the changes are performed, genqrc must be run again to update the content that
 // will ship with built binaries.
@@ -41,19 +47,31 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
 	"text/template"
+	"encoding/xml"
 
 	"gopkg.in/qml.v1"
 )
 
-const doc = `
-Usage: genqrc [options] <subdir1> [<subdir2> ...]
+// XXX: The documentation is duplicated here and in the the package comment
+// above. Update both at the same time.
 
-The genqrc tool packs all resource files under the provided subdirectories into
+const doc = `
+** Modified **
+Usage: genqrc [options] <path1> [<path2> ...]
+
+The genqrc tool packs all resource files under the provided paths into
 a single qrc.go file that may be built into the generated binary. Bundled files
 may then be loaded by Go or QML code under the URL "qrc:///some/path", where
 "some/path" matches the original path for the resource file locally.
+
+paths can be:
+  * a .qrc filename, as defined by http://doc.qt.io/qt-5/resources.html and built by
+      Qt Creator. This is the preferred method
+  * a filename. The file will be imported directly
+  * a directory. all files within the directory will be imported
 
 For example, the following will load a .qml file from the resource pack, and
 that file may in turn reference other content (code, images, etc) in the pack:
@@ -64,7 +82,7 @@ Starting with Go 1.4, this tool may be conveniently run by the "go generate"
 subcommand by adding a line similar to the following one to any existent .go
 file in the project (assuming the subdirectories ./code/ and ./images/ exist):
 
-    //go:generate genqrc code images
+    //go:generate genqrc qml.qrc main.qml code images
 
 Then, just run "go generate" to update the qrc.go file.
 
@@ -80,10 +98,94 @@ the changes are performed, genqrc must be run again to update the content that
 will ship with built binaries.
 `
 
-// XXX: The documentation is duplicated here and in the the package comment
-// above. Update both at the same time.
-
 var packageName = flag.String("package", "main", "package name that qrc.go will be under (not needed for go generate)")
+
+// XXX any changes made here should be copied exactly into its counterpart in the template below
+func qrcPackResources(subdirs []string) ([]byte, error) {
+
+	type qrcFile struct {
+		Alias string        `xml:"alias,attr"`
+		Name  string        `xml:",chardata"`
+	}
+
+	type qrcResource struct {
+		Prefix string        `xml:"prefix,attr"`
+		Files  []qrcFile    `xml:"file"`
+	}
+
+	type qrcQrcFile struct {
+		XMLName   xml.Name      `xml:"RCC"`
+		Resources []qrcResource `xml:"qresource"`
+	}
+
+	qrcParseQrc := func(name string) (map[string]string, error) {
+		data, err := ioutil.ReadFile(name)
+		if err != nil {
+			return nil, err
+		}
+
+		base := path.Dir(name)
+
+		qrc := qrcQrcFile{}
+		err = xml.Unmarshal(data, &qrc)
+		if err != nil {
+			return nil, err
+		}
+
+		out := make(map[string]string)
+
+		for _, resource := range qrc.Resources {
+			for _, file := range resource.Files {
+				label := file.Name
+				if file.Alias != "" {
+					label = file.Alias
+				}
+				out[path.Join(resource.Prefix, label)] = path.Join(base, file.Name)
+			}
+		}
+		return out, nil
+	}
+
+	var rp qml.ResourcesPacker
+
+	for _, subdir := range subdirs {
+		err := filepath.Walk(subdir, func(name string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			fmt.Println(name, path.Ext(name))
+			if path.Ext(name) == ".qrc" {
+				files, err := qrcParseQrc(name)
+				if err != nil {
+					return err
+				}
+				for label, filename := range files {
+					data, err := ioutil.ReadFile(filename)
+					if err != nil {
+						return err
+					}
+					rp.Add(label, data)
+				}
+				return nil
+			}
+
+			data, err := ioutil.ReadFile(name)
+			if err != nil {
+				return err
+			}
+			rp.Add(filepath.ToSlash(name), data)
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return rp.Pack().Bytes(), nil
+}
 
 func main() {
 	flag.Usage = func() {
@@ -100,32 +202,13 @@ func main() {
 func run() error {
 	subdirs := flag.Args()
 	if len(subdirs) == 0 {
-		return fmt.Errorf("must provide at least one subdirectory path")
+		return fmt.Errorf("must provide at least one path")
 	}
 
-	var rp qml.ResourcesPacker
-
-	for _, subdir := range flag.Args() {
-		err := filepath.Walk(subdir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if info.IsDir() {
-				return nil
-			}
-			data, err := ioutil.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			rp.Add(filepath.ToSlash(path), data)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
+	resdata, err := qrcPackResources(subdirs)
+	if err != nil {
+		return err
 	}
-
-	resdata := rp.Pack().Bytes()
 
 	f, err := os.Create("qrc.go")
 	if err != nil {
@@ -164,55 +247,112 @@ var tmpl = buildTemplate("qrc.go", `package {{.PackageName}}
 import (
 	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
+	"encoding/xml"
 
 	"gopkg.in/qml.v1"
 )
 
 func init() {
-	var r *qml.Resources
-	var err error
 	if os.Getenv("QRC_REPACK") == "1" {
-		err = qrcRepackResources()
+		data, err := qrcPackResources({{printf "%#v" .SubDirs}})
 		if err != nil {
 			panic("cannot repack qrc resources: " + err.Error())
 		}
-		r, err = qml.ParseResources(qrcResourcesRepacked)
-	} else {
-		r, err = qml.ParseResourcesString(qrcResourcesData)
+		qrcResourcesData = string(data)
 	}
+	r, err := qml.ParseResourcesString(qrcResourcesData)
 	if err != nil {
 		panic("cannot parse bundled resources data: " + err.Error())
 	}
 	qml.LoadResources(r)
 }
 
-func qrcRepackResources() error {
-	subdirs := {{printf "%#v" .SubDirs}}
+func qrcPackResources(subdirs []string) ([]byte, error) {
+
+	type qrcFile struct {
+		Alias string        ` + "`xml:\"alias,attr\"`" + `
+		Name  string        ` + "`xml:\",chardata\"`" + `
+	}
+
+	type qrcResource struct {
+		Prefix string        ` + "`xml:\"prefix,attr\"`" + `
+		Files  []qrcFile    ` + "`xml:\"file\"`" + `
+	}
+
+	type qrcQrcFile struct {
+		XMLName   xml.Name      ` + "`xml:\"RCC\"`" + `
+		Resources []qrcResource ` + "`xml:\"qresource\"`" + `
+	}
+
+	qrcParseQrc := func(name string) (map[string]string, error) {
+		data, err := ioutil.ReadFile(name)
+		if err != nil {
+			return nil, err
+		}
+
+		base := path.Dir(name)
+
+		qrc := qrcQrcFile{}
+		err = xml.Unmarshal(data, &qrc)
+		if err != nil {
+			return nil, err
+		}
+
+		out := make(map[string]string)
+
+		for _, resource := range qrc.Resources {
+			for _, file := range resource.Files {
+				label := file.Name
+				if file.Alias != "" {
+					label = file.Alias
+				}
+				out[path.Join(resource.Prefix, label)] = path.Join(base, file.Name)
+			}
+		}
+		return out, nil
+	}
+
 	var rp qml.ResourcesPacker
+
 	for _, subdir := range subdirs {
-		err := filepath.Walk(subdir, func(path string, info os.FileInfo, err error) error {
+		err := filepath.Walk(subdir, func(name string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
 			if info.IsDir() {
 				return nil
 			}
-			data, err := ioutil.ReadFile(path)
+			if path.Ext(name) == "qrc" {
+				files, err := qrcParseQrc(name)
+				if err != nil {
+					return err
+				}
+				for label, filename := range files {
+					data, err := ioutil.ReadFile(filename)
+					if err != nil {
+						return err
+					}
+					rp.Add(label, data)
+				}
+				return nil
+			}
+
+			data, err := ioutil.ReadFile(name)
 			if err != nil {
 				return err
 			}
-			rp.Add(filepath.ToSlash(path), data)
+			rp.Add(filepath.ToSlash(name), data)
 			return nil
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	qrcResourcesRepacked = rp.Pack().Bytes()
-	return nil
+
+	return rp.Pack().Bytes(), nil
 }
 
-var qrcResourcesRepacked []byte
 var qrcResourcesData = {{printf "%q" .ResourcesData}}
 `)
