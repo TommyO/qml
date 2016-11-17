@@ -12,10 +12,9 @@
 // "some/path" matches the original path for the resource file locally.
 //
 // paths can be:
-//   * a .qrc filename, as defined by http://doc.qt.io/qt-5/resources.html and built by
-//       Qt Creator. This is the preferred method
-//   * a filename. The file will be imported directly
-//   * a directory. all files within the directory will be imported
+// * a .qrc filename, as defined by http://doc.qt.io/qt-5/resources.html and built by Qt Creator.
+// * a filename. The file will be imported directly
+// * a directory. all files within the directory will be imported
 //
 // For example, the following will load a .qml file from the resource pack, and
 // that file may in turn reference other content (code, images, etc) in the pack:
@@ -42,9 +41,9 @@
 // will ship with built binaries.
 //
 // NOTES:
-//     * Files labeled *.qrc are not parsed unless explicitely set in the parameters list.
-//     * All *.qmltypes files are ignored, since they are not intended to be useful to the compiled code.
-//     * qmldir files are currently ignored and so import definitions need to be handled accordingly. Would love for this to change.
+// * Files labeled *.qrc are not parsed unless explicitely set in the parameters list.
+// * All *.pri and *.qmltypes files are ignored.
+// * qmldir files are currently ignored and so import definitions need to be handled accordingly.
 
 package main
 
@@ -53,7 +52,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
-	"path"
 	"path/filepath"
 	"text/template"
 	"encoding/xml"
@@ -74,10 +72,9 @@ may then be loaded by Go or QML code under the URL "qrc:///some/path", where
 "some/path" matches the original path for the resource file locally.
 
 paths can be:
-  * a *.qrc filename, as defined by http://doc.qt.io/qt-5/resources.html and built by
-      Qt Creator. This is the preferred method
-  * a filename. The file will be imported directly
-  * a directory. all files within the directory will be imported
+* a *.qrc filename, as defined by http://doc.qt.io/qt-5/resources.html and built by Qt Creator.
+* a filename. The file will be imported directly
+* a directory. all files within the directory will be imported
 
 For example, the following will load a .qml file from the resource pack, and
 that file may in turn reference other content (code, images, etc) in the pack:
@@ -104,9 +101,9 @@ the changes are performed, genqrc must be run again to update the content that
 will ship with built binaries.
 
 NOTES:
-    * Files labeled *.qrc are not parsed unless explicitely set in the parameters list.
-    * All *.qmltypes files are ignored, since they are not intended to be useful to the compiler.
-    * qmldir files are currently ignored and so import definitions need to be handled accordingly. Would love for this to change.
+* Files labeled *.qrc are not parsed unless explicitely set in the parameters list.
+* All *.pri and *.qmltypes files are ignored.
+* qmldir files are currently ignored and so import definitions need to be handled accordingly.
 `
 
 var packageName = flag.String("package", "main", "package name that qrc.go will be under (not needed for go generate)")
@@ -135,7 +132,7 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 			return nil, err
 		}
 
-		dir := path.Dir(name)
+		dir := filepath.Dir(name)
 
 		qrc := qrcQrcFile{}
 		err = xml.Unmarshal(data, &qrc)
@@ -147,11 +144,11 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 
 		for _, resource := range qrc.Resources {
 			for _, file := range resource.Files {
-				label := file.Name
+				label := filepath.Join(resource.Prefix, file.Name)
 				if file.Alias != "" {
-					label = file.Alias
+					label = filepath.Join(resource.Prefix, file.Alias)
 				}
-				out[path.Join(resource.Prefix, label)] = path.Join(dir, file.Name)
+				out[label] = filepath.Join(dir, file.Name)
 			}
 		}
 		return out, nil
@@ -164,20 +161,18 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 			if err != nil {
 				return err
 			}
-			if info.IsDir() {
-				return nil
-			}
-			// ignore qmldir files for now
-			if info.Name() == "qmldir" {
-				return nil
-			}
 
-			ext := path.Ext(name)
-			// *.qmltypes files shouldn't be included
-			switch ext {
-			case ".qmltypes":
-				break
-			case ".qrc":
+			ext := filepath.Ext(name)
+			switch true {
+			case info.IsDir():
+			case info.Name() == "qmldir":
+				fmt.Printf("Skipping file: %s\n", name)
+			case ext == ".qmltypes":
+				fmt.Printf("Skipping file: %s\n", name)
+			case ext == ".pri":
+				fmt.Printf("Skipping file: %s\n", name)
+			case ext == ".qrc":
+				fmt.Printf("Processing file: %s\n", name)
 				files, err := qrcParseQrc(name)
 				if err != nil {
 					return err
@@ -187,13 +182,16 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 					if err != nil {
 						return err
 					}
+					fmt.Printf("\tAdding: %s\n", label)
 					rp.Add(label, data)
 				}
+				fmt.Println("\tDone.")
 			default:
 				data, err := ioutil.ReadFile(name)
 				if err != nil {
 					return err
 				}
+				fmt.Printf("Adding: %s\n", name)
 				rp.Add(filepath.ToSlash(name), data)
 			}
 			return nil
@@ -266,7 +264,7 @@ var tmpl = buildTemplate("qrc.go", `package {{.PackageName}}
 import (
 	"io/ioutil"
 	"os"
-	"path"
+	"fmt"
 	"path/filepath"
 	"encoding/xml"
 
@@ -277,6 +275,7 @@ func init() {
 	qrcResourcesData := {{printf "%q" .ResourcesData}}
 
 	if os.Getenv("QRC_REPACK") == "1" {
+		fmt.Println("Repacking resources")
 		data, err := qrcPackResources({{printf "%#v" .SubDirs}})
 		if err != nil {
 			panic("cannot repack qrc resources: " + err.Error())
@@ -313,7 +312,7 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 			return nil, err
 		}
 
-		base := path.Dir(name)
+		base := filepath.Dir(name)
 
 		qrc := qrcQrcFile{}
 		err = xml.Unmarshal(data, &qrc)
@@ -325,11 +324,11 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 
 		for _, resource := range qrc.Resources {
 			for _, file := range resource.Files {
-				label := file.Name
+				label := filepath.Join(resource.Prefix, file.Name)
 				if file.Alias != "" {
-					label = file.Alias
+					label = filepath.Join(resource.Prefix, file.Alias)
 				}
-				out[path.Join(resource.Prefix, label)] = path.Join(base, file.Name)
+				out[label] = filepath.Join(dir, file.Name)
 			}
 		}
 		return out, nil
@@ -342,20 +341,18 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 			if err != nil {
 				return err
 			}
-			if info.IsDir() {
-				return nil
-			}
-			// ignore qmldir files for now
-			if info.Name() == "qmldir" {
-				return nil
-			}
 
-			ext := path.Ext(name)
-			// *.qmltypes files shouldn't be included
-			switch ext {
-			case ".qmltypes":
-				break
-			case ".qrc":
+			ext := filepath.Ext(name)
+			switch true {
+			case info.IsDir():
+			case info.Name() == "qmldir":
+				fmt.Printf("Skipping file: %s\n", name)
+			case ext == ".qmltypes":
+				fmt.Printf("Skipping file: %s\n", name)
+			case ext == ".pri":
+				fmt.Printf("Skipping file: %s\n", name)
+			case ext == ".qrc":
+				fmt.Printf("Processing file: %s\n", name)
 				files, err := qrcParseQrc(name)
 				if err != nil {
 					return err
@@ -365,13 +362,16 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 					if err != nil {
 						return err
 					}
+					fmt.Printf("\tAdding: %s\n", label)
 					rp.Add(label, data)
 				}
+				fmt.Println("\tDone.")
 			default:
 				data, err := ioutil.ReadFile(name)
 				if err != nil {
 					return err
 				}
+				fmt.Printf("Adding: %s\n", name)
 				rp.Add(filepath.ToSlash(name), data)
 			}
 			return nil
