@@ -274,6 +274,8 @@ import (
 )
 
 func init() {
+	qrcResourcesData := {{printf "%q" .ResourcesData}}
+
 	if os.Getenv("QRC_REPACK") == "1" {
 		data, err := qrcPackResources({{printf "%#v" .SubDirs}})
 		if err != nil {
@@ -381,6 +383,4 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 
 	return rp.Pack().Bytes(), nil
 }
-
-var qrcResourcesData = {{printf "%q" .ResourcesData}}
 `)
