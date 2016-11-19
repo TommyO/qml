@@ -312,7 +312,7 @@ func qrcPackResources(subdirs []string) ([]byte, error) {
 			return nil, err
 		}
 
-		base := filepath.Dir(name)
+		dir := filepath.Dir(name)
 
 		qrc := qrcQrcFile{}
 		err = xml.Unmarshal(data, &qrc)
